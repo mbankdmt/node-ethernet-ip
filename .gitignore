@@ -10,3 +10,4 @@
 
 # Ignore Local Script Folder
 /scripts
+/.vs
