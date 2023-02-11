@@ -11,9 +11,9 @@ const compare = (obj1, obj2) => {
 };
 
 class Controller extends ENIP {
-    constructor({ queue_max_size } = {}) {
+    constructor() {
         super();
-        
+
         this.state = {
             ...this.state,
             controller: {
@@ -37,9 +37,10 @@ class Controller extends ENIP {
         };
 
         this.workers = {
-            read: new Queue(compare, queue_max_size),
-            write: new Queue(compare, queue_max_size),
-            group: new Queue(compare, queue_max_size)
+            read: new Queue(compare),
+            write: new Queue(compare),
+            group: new Queue(compare),
+            generic: new Queue(compare),
         };
     }
 
@@ -147,6 +148,231 @@ class Controller extends ENIP {
 
         //TODO: Implement Connected Version
         super.write_cip(msg, connected, timeout, cb);
+    }
+
+    /* For reading generic CIP Objects */
+    write_cip_generic(data, connected = false, timeout = 10, cb = null) {
+        //TODO: Implement Connected Version
+        // We can bypass the unconnected-send encapsulation entirely. No routing to the CPU needed.
+        super.write_cip(data, connected, timeout, cb);
+    }
+
+    executeGenericCIP(genCipParams, genCipService) {
+        if (typeof genCipParams === "undefined" || typeof genCipParams !== "object") throw new Error("Provide the params in form of an Object");
+        /* eslint-disable indent*/
+        switch (genCipService) {
+            case "readGenericSingle":
+                return this.workers.generic.schedule(this._readGenericSingle.bind(this), [genCipParams.classID, genCipParams.instanceID, genCipParams.attributeID], {
+                    priority: 1,
+                    timestamp: new Date()
+                });
+            case "readGenericAll":
+                return this.workers.generic.schedule(this._readGenericAll.bind(this), [genCipParams.classID, genCipParams.instanceID], {
+                    priority: 1,
+                    timestamp: new Date()
+                });
+            case "writeGenericSingle":
+                return this.workers.generic.schedule(this._writeGenericSingle.bind(this), [
+                    genCipParams.classID,
+                    genCipParams.instanceID,
+                    genCipParams.attributeID,
+                    genCipParams.writeData], {
+                    priority: 1,
+                    timestamp: new Date()
+                });
+            case "writeGenericAll":
+                return this.workers.generic.schedule(this._writeGenericSingle.bind(this), [
+                    genCipParams.classID,
+                    genCipParams.instanceID,
+                    genCipParams.writeData], {
+                    priority: 1,
+                    timestamp: new Date()
+                });
+        }
+    }
+
+    /**
+     * Reads a all entities (class/instance/attribute) from a generic CIP object
+     *
+     * @param {number} classID - The ClassID of the requested object
+     * @param {number} instanceID - The InstanceID of the requested object
+     * @param {number} attributeID - The AttributeID of the requested object
+     * @memberof Controller
+     * @returns {Promise}
+     */
+    async _readGenericAll(classID, instanceID) {
+        if (classID <= 0 || typeof classID !== "number") throw new Error("ClassID needs to be positive and a number");
+        if (instanceID != undefined && (instanceID <= 0 || typeof instanceID !== "number")) throw new Error("InstanceID needs to be positive and a number");
+
+        const { GET_ATTRIBUTE_ALL } = CIP.MessageRouter.services;
+        const { LOGICAL } = CIP.EPATH.segments;
+
+        // Build Identity Object Logical Path Buffer
+        let identityPath = LOGICAL.build(LOGICAL.types.ClassID, classID); // Object
+        if (instanceID) identityPath = Buffer.concat([identityPath, LOGICAL.build(LOGICAL.types.InstanceID, instanceID)]); // Instance 
+
+        // Message Router to Embed in UCMM
+        const MR = CIP.MessageRouter.build(GET_ATTRIBUTE_ALL, identityPath, []);
+
+        this.write_cip_generic(MR);
+
+        const readPropsErr = new Error("TIMEOUT occurred while reading Controller Props.");
+
+        // Wait for Response
+        const data = await promiseTimeout(
+            new Promise((resolve, reject) => {
+                this.on("Get Attribute All", (err, data) => {
+                    if (err) reject(err);
+                    resolve(data);
+                });
+            }),
+            10000,
+            readPropsErr
+        );
+
+        this.removeAllListeners("Get Attribute All");
+
+        return data;
+    }
+
+    /**
+     * Reads a single entity (class/instance/attribute) from a generic CIP object
+     *
+     * @param {number} classID - The ClassID of the requested object
+     * @param {number} instanceID - The InstanceID of the requested object
+     * @param {number} attributeID - The AttributeID of the requested object
+     * @memberof Controller
+     * @returns {Promise}
+     */
+    async _readGenericSingle(classID, instanceID, attributeID) {
+        if (classID <= 0 || typeof classID !== "number") throw new Error("ClassID needs to be positive and a number");
+        if (instanceID != undefined && (instanceID <= 0 || typeof instanceID !== "number")) throw new Error("InstanceID needs to be positive and a number");
+        if (attributeID != undefined && (attributeID <= 0 || typeof instanceID !== "number")) throw new Error("AttributeID needs to be positive and a number");
+
+        const { GET_ATTRIBUTE_SINGLE } = CIP.MessageRouter.services;
+        const { LOGICAL } = CIP.EPATH.segments;
+
+        // Build Identity Object Logical Path Buffer
+        let identityPath = LOGICAL.build(LOGICAL.types.ClassID, classID); // Object
+        if (instanceID) identityPath = Buffer.concat([identityPath, LOGICAL.build(LOGICAL.types.InstanceID, instanceID)]); // Instance 
+        if (attributeID) identityPath = Buffer.concat([identityPath, LOGICAL.build(LOGICAL.types.AttributeID, attributeID)]); // Attribute
+
+        // Message Router to Embed in UCMM
+        const MR = CIP.MessageRouter.build(GET_ATTRIBUTE_SINGLE, identityPath, []);
+
+        this.write_cip_generic(MR);
+
+        const readPropsErr = new Error("TIMEOUT occurred while reading Controller Props.");
+
+        // Wait for Response
+        const data = await promiseTimeout(
+            new Promise((resolve, reject) => {
+                this.on("Get Attribute Single", (err, data) => {
+                    if (err) reject(err);
+                    resolve(data);
+                });
+            }),
+            10000,
+            readPropsErr
+        );
+
+        this.removeAllListeners("Get Attribute Single");
+
+        return data;
+    }
+
+    /**
+     * Write all attributes of a generic CIP object
+     *
+     * @param {number} classID - The ClassID of the requested object
+     * @param {number} instanceID - The InstanceID of the requested object
+     * @param {number} attributeID - The AttributeID of the requested object
+     * @param {buffer} writeData - A buffer with data that is to be written to the CIP object <- This is object specific!
+     * @memberof Controller
+     * @returns {Promise}
+     */
+    async _writeGenericAll(classID, instanceID, writeData) {
+        if (classID <= 0 || typeof classID !== "number") throw new Error("ClassID needs to be positive and a number");
+        if (instanceID != undefined && (instanceID <= 0 || typeof instanceID !== "number")) throw new Error("InstanceID needs to be positive and a number");
+        if (writeData == undefined || (!Buffer.isBuffer(writeData))) throw new Error("writeData Must be of Type Buffer");
+
+        const { SET_ATTRIBUTE_ALL } = CIP.MessageRouter.services;
+        const { LOGICAL } = CIP.EPATH.segments;
+
+        // Build Identity Object Logical Path Buffer
+        let identityPath = LOGICAL.build(LOGICAL.types.ClassID, classID); // Object
+        if (instanceID) identityPath = Buffer.concat([identityPath, LOGICAL.build(LOGICAL.types.InstanceID, instanceID)]); // Instance 
+
+        // Message Router to Embed in UCMM
+        const MR = CIP.MessageRouter.build(SET_ATTRIBUTE_ALL, identityPath, writeData);
+
+        this.write_cip_generic(MR);
+
+        const readPropsErr = new Error("TIMEOUT occurred while reading Controller Props.");
+
+        // Wait for Response
+        const data = await promiseTimeout(
+            new Promise((resolve, reject) => {
+                this.on("Set Attribute All", (err, data) => {
+                    if (err) reject(err);
+                    resolve(data);
+                });
+            }),
+            10000,
+            readPropsErr
+        );
+
+        this.removeAllListeners("Set Attribute Single");
+
+        return data;
+    }
+
+    /**
+     * Writes to a generic CIP object
+     *
+     * @param {number} classID - The ClassID of the requested object
+     * @param {number} instanceID - The InstanceID of the requested object
+     * @param {number} attributeID - The AttributeID of the requested object
+     * @param {buffer} writeData - A buffer with data that is to be written to the CIP object <- This is object specific!
+     * @memberof Controller
+     * @returns {Promise}
+     */
+    async _writeGenericSingle(classID, instanceID, attributeID, writeData) {
+        if (classID <= 0 || typeof classID !== "number") throw new Error("ClassID needs to be positive and a number");
+        if (instanceID != undefined && (instanceID <= 0 || typeof instanceID !== "number")) throw new Error("InstanceID needs to be positive and a number");
+        if (attributeID != undefined && (attributeID <= 0 || typeof instanceID !== "number")) throw new Error("AttributeID needs to be positive and a number");
+        if (writeData == undefined || (!Buffer.isBuffer(writeData))) throw new Error("writeData Must be of Type Buffer");
+
+        const { SET_ATTRIBUTE_SINGLE } = CIP.MessageRouter.services;
+        const { LOGICAL } = CIP.EPATH.segments;
+
+        // Build Identity Object Logical Path Buffer
+        let identityPath = LOGICAL.build(LOGICAL.types.ClassID, classID); // Object
+        if (instanceID) identityPath = Buffer.concat([identityPath, LOGICAL.build(LOGICAL.types.InstanceID, instanceID)]); // Instance 
+        if (attributeID) identityPath = Buffer.concat([identityPath, LOGICAL.build(LOGICAL.types.AttributeID, attributeID)]); // Attribute
+
+        // Message Router to Embed in UCMM
+        const MR = CIP.MessageRouter.build(SET_ATTRIBUTE_SINGLE, identityPath, writeData);
+
+        this.write_cip_generic(MR);
+
+        const readPropsErr = new Error("TIMEOUT occurred while reading Controller Props.");
+
+        // Wait for Response
+        const data = await promiseTimeout(
+            new Promise((resolve, reject) => {
+                this.on("Set Attribute Single", (err, data) => {
+                    if (err) reject(err);
+                    resolve(data);
+                });
+            }),
+            10000,
+            readPropsErr
+        );
+
+        this.removeAllListeners("Set Attribute Single");
+
+        return data;
     }
 
     /**
@@ -587,7 +813,7 @@ class Controller extends ENIP {
     async _writeTagGroup(group) {
         const messages = group.generateWriteMessageRequests();
 
-        const writeTagGroupErr = new Error("TIMEOUT occurred while writing Writing Tag Group.");
+        const writeTagGroupErr = new Error("TIMEOUT occurred while writing Reading Tag Group.");
 
         // Send Each Multi Service Message
         for (let msg of messages) {
@@ -655,6 +881,7 @@ class Controller extends ENIP {
             GET_ATTRIBUTE_SINGLE,
             GET_ATTRIBUTE_ALL,
             SET_ATTRIBUTE_SINGLE,
+            SET_ATTRIBUTE_ALL,
             READ_TAG,
             READ_TAG_FRAGMENTED,
             WRITE_TAG,
@@ -677,6 +904,9 @@ class Controller extends ENIP {
             case SET_ATTRIBUTE_SINGLE:
                 this.emit("Set Attribute Single", error, data);
                 break;
+            case SET_ATTRIBUTE_ALL:
+                this.emit("Set Attribute All", error, data);
+                break;
             case READ_TAG:
                 this.emit("Read Tag", error, data);
                 break;
@@ -688,7 +918,7 @@ class Controller extends ENIP {
                 break;
             case WRITE_TAG_FRAGMENTED:
                 this.emit("Write Tag Fragmented", error, data);
-                break;            
+                break;
             case READ_MODIFY_WRITE_TAG:
                 this.emit("Read Modify Write Tag", error, data);
                 break;
