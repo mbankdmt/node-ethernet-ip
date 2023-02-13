@@ -123,7 +123,9 @@ class Controller extends ENIP {
         this._initializeControllerEventHandlers();
 
         // Fetch Controller Properties and Wall Clock
-        await this.readControllerProps();
+
+        // Does not fork with FC102
+        //await this.readControllerProps();
     }
 
     /**
